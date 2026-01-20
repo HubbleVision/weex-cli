@@ -14,11 +14,11 @@ with open("requirements.txt", "r", encoding="utf-8") as fh:
 setup(
     name="weex-cli",
     version="1.0.0",
-    author="SignalAlpha",
+    author="HubbleVision",
     description="WEEX合约交易命令行工具",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/signalalpha/weex-cli",
+    url="https://github.com/HubbleVision/weex-cli",
     py_modules=["weex_cli"],
     install_requires=requirements,
     entry_points={

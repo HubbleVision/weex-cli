@@ -18,7 +18,7 @@ WEEX合约交易命令行工具，提供完整的交易功能，包括下单、�
 
 ```bash
 # 克隆仓库
-git clone https://github.com/signalalpha/weex-cli.git
+git clone https://github.com/HubbleVision/weex-cli.git
 cd weex-cli
 
 # 安装依赖
