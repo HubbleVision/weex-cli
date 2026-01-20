@@ -13,7 +13,7 @@ import json
 import os
 import sys
 import argparse
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 
 # Try to load .env file if python-dotenv is available
 try:
@@ -272,23 +272,50 @@ def get_trade_fills(symbol: str, page_size: int = 10, verbose: bool = False) -> 
         return None
 
 
-def get_single_position(symbol: str, verbose: bool = False) -> Optional[Dict]:
-    """获取单个合约的仓位信息"""
+def get_single_position(symbol: str, verbose: bool = False) -> Tuple[bool, Optional[Dict], Optional[str]]:
+    """
+    获取单个合约的仓位信息
+    
+    Returns:
+        (success, data, error_message)
+        - success: True表示API调用成功，False表示查询失败
+        - data: 如果有仓位数据则为dict，否则为None
+        - error_message: 如果查询失败则为错误信息，否则为None
+    """
     request_path = "/capi/v2/account/position/singlePosition"
     query_string = f"?symbol={symbol}"
-    response = send_request("GET", request_path, query_string=query_string, verbose=verbose)
+    
+    try:
+        response = send_request("GET", request_path, query_string=query_string, verbose=verbose)
+    except Exception as e:
+        # 网络错误或其他异常
+        error_msg = f"查询失败: {str(e)}"
+        if verbose:
+            print(f"❌ {error_msg}")
+        return (False, None, error_msg)
     
     if response.status_code == 200:
-        return response.json()
+        data = response.json()
+        # 直接返回原始数据，不做判断，让调用方决定如何显示
+        return (True, data, None)
     else:
+        # API返回错误
+        error_msg = f"HTTP {response.status_code}"
+        try:
+            error_data = response.json()
+            error_msg = error_data.get("message", error_data.get("msg", error_msg))
+        except:
+            error_msg = f"HTTP {response.status_code}: {response.text[:100]}"
+        
         if verbose:
-            print(f"⚠️  查询 {symbol} 仓位失败: {response.status_code}")
+            print(f"❌ 查询 {symbol} 仓位失败: {error_msg}")
             try:
                 error_data = response.json()
                 print(json.dumps(error_data, indent=2, ensure_ascii=False))
             except:
                 print(response.text)
-        return None
+        
+        return (False, None, error_msg)
 
 
 def get_all_positions(verbose: bool = False) -> List[Dict]:
@@ -299,26 +326,58 @@ def get_all_positions(verbose: bool = False) -> List[Dict]:
     all_symbols = list(SYMBOL_PRECISION.keys())
     
     positions = []
+    errors = []
+    
     for symbol in all_symbols:
-        position_data = get_single_position(symbol, verbose=False)  # 不显示每个的详细日志
+        success, position_data, error_msg = get_single_position(symbol, verbose=False)  # 不显示每个的详细日志
+        
+        if not success:
+            # 查询失败，记录错误但继续处理其他交易对
+            errors.append(f"{symbol}: {error_msg}")
+            continue
         
         if position_data:
-            # 处理不同的响应格式
-            if isinstance(position_data, dict):
-                # 检查是否有仓位数据
+            # 提取实际的仓位数据并检查是否有持仓
+            has_position = False
+            pos = None
+            
+            if isinstance(position_data, list):
+                # API返回数组格式，取第一个元素
+                if len(position_data) > 0:
+                    pos = position_data[0]
+            elif isinstance(position_data, dict):
                 if "data" in position_data:
                     pos = position_data["data"]
-                    if pos and (isinstance(pos, dict) and (pos.get("size") or pos.get("amount"))):
-                        positions.append({
-                            "symbol": symbol,
-                            **pos
-                        })
-                elif position_data.get("size") or position_data.get("amount"):
-                    # 直接是仓位数据
+                else:
+                    pos = position_data
+            
+            if pos and isinstance(pos, dict):
+                # 检查是否有仓位
+                size = pos.get("size") or pos.get("amount") or "0"
+                # 注意：API返回的字段名是 unrealizePnl（没有d），不是 unrealizedPnl
+                unrealized_pnl = (pos.get("unrealizePnl") or 
+                                 pos.get("unrealizedPnl") or 
+                                 pos.get("unrealizedPNL") or 
+                                 pos.get("unrealized_pnl") or "0")
+                
+                try:
+                    if float(size) > 0 or float(unrealized_pnl) != 0:
+                        has_position = True
+                except:
+                    # 如果无法解析，也认为有持仓
+                    has_position = True
+                
+                if has_position:
                     positions.append({
                         "symbol": symbol,
-                        **position_data
+                        **pos
                     })
+    
+    # 如果有查询失败的情况，在详细模式下显示
+    if errors and verbose:
+        print(f"\n⚠️  部分交易对查询失败:")
+        for error in errors:
+            print(f"  {error}")
     
     return positions
 
@@ -504,12 +563,84 @@ def cmd_positions(args):
     if args.symbol:
         # 查询单个合约的仓位
         print(f"查询 {args.symbol} 的仓位信息...")
-        data = get_single_position(args.symbol, verbose=args.verbose)
+        success, data, error_msg = get_single_position(args.symbol, verbose=args.verbose)
+        
+        if not success:
+            # 查询失败
+            print(f"\n❌ 查询失败: {error_msg}")
+            return
+        
         if data:
-            print(f"\n{args.symbol} 仓位信息:")
-            print_json(data)
-        else:
-            print(f"\n⚠️  {args.symbol} 没有持仓或查询失败")
+            # 提取实际的仓位数据
+            position_data = None
+            
+            if isinstance(data, list):
+                # API返回数组格式，取第一个元素
+                if len(data) > 0:
+                    position_data = data[0]
+            elif isinstance(data, dict):
+                # API返回对象格式
+                if "data" in data:
+                    position_data = data["data"]
+                else:
+                    position_data = data
+            
+            # 检查是否有持仓
+            has_position = False
+            if position_data and isinstance(position_data, dict):
+                # 检查是否有仓位相关的字段
+                size = position_data.get("size") or position_data.get("amount") or "0"
+                # 注意：API返回的字段名是 unrealizePnl（没有d），不是 unrealizedPnl
+                unrealized_pnl = (position_data.get("unrealizePnl") or 
+                                 position_data.get("unrealizedPnl") or 
+                                 position_data.get("unrealizedPNL") or 
+                                 position_data.get("unrealized_pnl") or "0")
+                
+                try:
+                    if float(size) > 0 or float(unrealized_pnl) != 0:
+                        has_position = True
+                except:
+                    # 如果无法解析，也显示数据
+                    has_position = True
+            
+            if has_position:
+                # 有持仓数据，显示总结信息
+                print(f"\n📊 {args.symbol} 仓位信息:")
+                print("=" * 60)
+                
+                # 提取关键信息
+                size = position_data.get("size") or position_data.get("amount") or "0"
+                side = position_data.get("side") or position_data.get("positionSide") or "unknown"
+                leverage = position_data.get("leverage") or "1"
+                unrealized_pnl = (position_data.get("unrealizePnl") or 
+                                 position_data.get("unrealizedPnl") or 
+                                 position_data.get("unrealizedPNL") or 
+                                 position_data.get("unrealized_pnl") or "0")
+                open_value = position_data.get("open_value") or position_data.get("openValue") or "0"
+                margin_size = position_data.get("marginSize") or position_data.get("margin_size") or "0"
+                liquidate_price = position_data.get("liquidatePrice") or position_data.get("liquidate_price") or "N/A"
+                
+                print(f"  方向: {side}")
+                print(f"  数量: {size}")
+                print(f"  杠杆: {leverage}x")
+                print(f"  开仓价值: {open_value} USDT")
+                print(f"  保证金: {margin_size} USDT")
+                print(f"  未实现盈亏: {unrealized_pnl} USDT")
+                if liquidate_price != "N/A":
+                    print(f"  强平价: {liquidate_price}")
+                print("=" * 60)
+                
+                # 在verbose模式下显示完整原始数据
+                if args.verbose:
+                    print(f"\n完整原始数据 (JSON):")
+                    print_json(data)
+            else:
+                # 查询成功但没有持仓（正常情况）
+                print(f"\n✅ {args.symbol} 当前没有持仓")
+                # 在verbose模式下显示原始数据
+                if args.verbose:
+                    print(f"\nAPI返回的原始数据:")
+                    print_json(data)
     else:
         # 查询全部合约的仓位
         positions = get_all_positions(verbose=args.verbose)
@@ -521,36 +652,39 @@ def cmd_positions(args):
             print("\n" + "="*80)
             
             # 格式化显示
-            total_value = 0
+            total_open_value = 0
             for pos in positions:
                 symbol = pos.get("symbol", "unknown")
                 size = pos.get("size") or pos.get("amount") or "0"
                 side = pos.get("side") or pos.get("positionSide") or "unknown"
-                entry_price = pos.get("entryPrice") or pos.get("avgPrice") or "0"
-                mark_price = pos.get("markPrice") or pos.get("currentPrice") or "0"
-                unrealized_pnl = pos.get("unrealizedPnl") or pos.get("unrealizedPNL") or "0"
                 leverage = pos.get("leverage") or "1"
+                open_value = pos.get("open_value") or pos.get("openValue") or "0"
+                margin_size = pos.get("marginSize") or pos.get("margin_size") or "0"
+                # 注意：API返回的字段名是 unrealizePnl（没有d）
+                unrealized_pnl = (pos.get("unrealizePnl") or 
+                                 pos.get("unrealizedPnl") or 
+                                 pos.get("unrealizedPNL") or "0")
+                liquidate_price = pos.get("liquidatePrice") or pos.get("liquidate_price") or "N/A"
                 
-                # 计算持仓价值
+                # 累计开仓价值
                 try:
-                    size_float = float(size)
-                    mark_price_float = float(mark_price)
-                    value = size_float * mark_price_float
-                    total_value += value
+                    open_value_float = float(open_value)
+                    total_open_value += open_value_float
                 except:
-                    value = 0
+                    pass
                 
                 print(f"\n📊 {symbol}")
                 print(f"  方向: {side}")
                 print(f"  数量: {size}")
                 print(f"  杠杆: {leverage}x")
-                print(f"  开仓价: {entry_price}")
-                print(f"  标记价: {mark_price}")
+                print(f"  开仓价值: {open_value} USDT")
+                print(f"  保证金: {margin_size} USDT")
                 print(f"  未实现盈亏: {unrealized_pnl} USDT")
-                print(f"  持仓价值: {value:.2f} USDT")
+                if liquidate_price != "N/A":
+                    print(f"  强平价: {liquidate_price}")
             
             print("\n" + "="*80)
-            print(f"总持仓价值: {total_value:.2f} USDT")
+            print(f"总开仓价值: {total_open_value:.2f} USDT")
             print("="*80)
             
             # 如果需要，也输出JSON格式
