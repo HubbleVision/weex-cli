@@ -508,6 +508,45 @@ def cancel_order(order_id: str, verbose: bool = False) -> bool:
         return False
 
 
+def close_positions(symbol: Optional[str] = None, verbose: bool = False) -> Optional[List[Dict]]:
+    """
+    一键市价平仓
+    
+    Args:
+        symbol: 交易对符号，不传则平掉所有仓位
+        verbose: 是否显示详细信息
+    
+    Returns:
+        平仓结果列表，每个元素包含 positionId, success, successOrderId, errorMessage
+    """
+    request_path = "/capi/v2/order/closePositions"
+    body = {}
+    if symbol:
+        body["symbol"] = symbol
+    
+    response = send_request("POST", request_path, body=body, verbose=verbose)
+    
+    if response.status_code == 200:
+        data = response.json()
+        # API返回数组格式
+        if isinstance(data, list):
+            return data
+        elif isinstance(data, dict):
+            # 可能包装在data字段中
+            if "data" in data and isinstance(data["data"], list):
+                return data["data"]
+            return [data]
+        return []
+    else:
+        print(f"\n❌ 平仓失败: {response.status_code}")
+        try:
+            error_data = response.json()
+            print(json.dumps(error_data, indent=2, ensure_ascii=False))
+        except:
+            print(response.text)
+        return None
+
+
 # ==================== CLI 命令处理 ====================
 
 def cmd_account(args):
@@ -749,6 +788,55 @@ def cmd_cancel(args):
     cancel_order(args.order_id, verbose=args.verbose)
 
 
+def cmd_close(args):
+    """一键市价平仓"""
+    if args.symbol:
+        print(f"平仓 {args.symbol} 的仓位...")
+    else:
+        print("平掉所有仓位...")
+    
+    results = close_positions(symbol=args.symbol, verbose=args.verbose)
+    
+    if results is None:
+        return
+    
+    if len(results) == 0:
+        print("\n✅ 没有需要平仓的仓位")
+        return
+    
+    # 统计结果
+    success_count = 0
+    fail_count = 0
+    
+    print(f"\n平仓结果 (共 {len(results)} 个仓位):")
+    print("=" * 80)
+    
+    for result in results:
+        position_id = result.get("positionId", "N/A")
+        success = result.get("success", False)
+        order_id = result.get("successOrderId", 0)
+        error_msg = result.get("errorMessage", "")
+        
+        if success:
+            success_count += 1
+            print(f"\n✅ 仓位 {position_id} 平仓成功")
+            print(f"   订单ID: {order_id}")
+        else:
+            fail_count += 1
+            print(f"\n❌ 仓位 {position_id} 平仓失败")
+            if error_msg:
+                print(f"   错误: {error_msg}")
+    
+    print("\n" + "=" * 80)
+    print(f"总计: 成功 {success_count} 个, 失败 {fail_count} 个")
+    print("=" * 80)
+    
+    # 在verbose模式下显示完整原始数据
+    if args.verbose:
+        print("\n完整原始数据 (JSON):")
+        print_json(results)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="WEEX Trading CLI Tool - WEEX合约交易命令行工具",
@@ -787,6 +875,12 @@ def main():
 
   # 设置杠杆
   weex-cli leverage set -s cmt_btcusdt --long 20 --short 20 --mode 1
+
+  # 一键市价平仓（指定交易对）
+  weex-cli close -s cmt_btcusdt
+
+  # 一键市价平仓（平掉所有仓位）
+  weex-cli close
 
 环境变量:
   WEEX_API_KEY: API密钥
@@ -862,6 +956,11 @@ def main():
     parser_cancel = subparsers.add_parser("cancel", help="取消订单")
     parser_cancel.add_argument("order_id", help="订单ID")
     parser_cancel.set_defaults(func=cmd_cancel)
+    
+    # close 命令
+    parser_close = subparsers.add_parser("close", help="一键市价平仓")
+    parser_close.add_argument("-s", "--symbol", help="交易对符号 (可选，不指定则平掉所有仓位)")
+    parser_close.set_defaults(func=cmd_close)
     
     args = parser.parse_args()
     
